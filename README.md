@@ -58,7 +58,7 @@ streamlit run src/app.py
 ```
 document-intelligence/
 ├── src/
-│   ├── data_generation/    # Synthetic data creation
+│   ├── data_generation/    # Synthetic data creation (Testing purpose only if you have data/pdf with you then no need of this)
 │   ├── preprocessing/      # Document processing pipeline
 │   ├── models/            # Classification models
 │   ├── utils/             # Helper functions
