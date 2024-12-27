@@ -1,187 +1,177 @@
-from transformers import LayoutLMv2ForSequenceClassification, LayoutLMv2Processor
-import torch
-import numpy as np
-from torch.utils.data import DataLoader
-from tqdm import tqdm
+import streamlit as st
+import tempfile
+import os
+from datetime import datetime
+from preprocessing.processor import DocumentPreprocessor
+from models.classifier import DocumentClassifier
+from utils.info_extractor import InfoExtractor
+from utils.error_handler import validate_document, ValidationError
 
 
-class DocumentClassifier:
-    def __init__(self, model_path=None, num_labels=4, device=None):
-        """
-        Initializes the DocumentClassifier with a LayoutLMv2 model and processor.
+def setup_page_config():
+    st.set_page_config(
+        page_title="Document Intelligence System",
+        page_icon="📄",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
 
-        Args:
-            model_path (str): Path to a pre-trained model (if provided).
-            num_labels (int): Number of classification labels.
-            device (str): Device to use ('cuda' or 'cpu').
-        """
-        self.processor = LayoutLMv2Processor.from_pretrained("microsoft/layoutlmv2-base-uncased")
-
-        if model_path:
-            self.model = LayoutLMv2ForSequenceClassification.from_pretrained(model_path)
-        else:
-            self.model = LayoutLMv2ForSequenceClassification.from_pretrained(
-                "microsoft/layoutlmv2-base-uncased",
-                num_labels=num_labels
-            )
-
-        self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
-
-        self.label_map = {  # Default label mapping
-            0: "bank_account_application",
-            1: "identity_document",
-            2: "financial_document",
-            3: "receipt"
+    # Custom CSS for better UI
+    st.markdown("""
+        <style>
+        .main {
+            padding: 2rem;
         }
+        .stProgress > div > div > div > div {
+            background-color: #3498db;
+        }
+        .upload-box {
+            border: 2px dashed #3498db;
+            border-radius: 10px;
+            padding: 2rem;
+            text-align: center;
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
-    def set_label_map(self, label_map):
-        """
-        Sets a custom label map for classification.
-        """
-        self.label_map = label_map
 
-    def prepare_input(self, image, text, layout):
-        """
-        Prepares the input for the LayoutLMv2 model.
+def save_uploaded_file(uploaded_file):
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            return tmp_file.name
+    except Exception as e:
+        st.error(f"Error saving file: {str(e)}")
+        return None
 
-        Args:
-            image (PIL.Image): Input document image.
-            text (str): Extracted text from the document.
-            layout (dict): Layout information (coordinates of text boxes).
 
-        Returns:
-            dict: Encoded input for the model.
-        """
-        encoding = self.processor(
-            image,
-            text,
-            boxes=self._get_boxes(layout),
-            truncation=True,
-            padding="max_length",
-            max_length=512,
-            return_tensors="pt"
-        )
-        return encoding.to(self.device)
+def display_confidence_meter(confidence):
+    if confidence >= 0.8:
+        color = "green"
+    elif confidence >= 0.6:
+        color = "yellow"
+    else:
+        color = "red"
 
-    def _get_boxes(self, layout):
-        """
-        Converts layout information into bounding boxes.
-        """
-        return list(zip(layout["left"], layout["top"],
-                        layout["width"], layout["height"]))
+    st.markdown(f"""
+        <div style="border:1px solid {color}; padding:10px; border-radius:5px">
+            <div style="width:{confidence * 100}%; background-color:{color}; height:20px; border-radius:3px"></div>
+        </div>
+        <p style="text-align:center">{confidence:.1%}</p>
+    """, unsafe_allow_html=True)
 
-    def predict(self, image, text, layout):
-        """
-        Predicts the document type given the input image, text, and layout.
 
-        Args:
-            image (PIL.Image): Input document image.
-            text (str): Extracted text from the document.
-            layout (dict): Layout information (coordinates of text boxes).
+def main():
+    setup_page_config()
 
-        Returns:
-            dict: Predicted document type and confidence score.
-        """
+    # Sidebar
+    with st.sidebar:
+        st.image("path_to_logo.png", width=200)  # Add your logo
+        st.markdown("## Document Types")
+        st.markdown("• Bank Applications\n• Identity Documents\n• Financial Records\n• Receipts")
+
+        st.markdown("---")
+        st.markdown("### Processing Status")
+        if 'processed_docs' not in st.session_state:
+            st.session_state.processed_docs = 0
+        st.metric("Documents Processed", st.session_state.processed_docs)
+
+    # Main content
+    st.title("📄 Document Intelligence System")
+    st.markdown("### Upload and Process Financial Documents")
+
+    # Initialize components
+    processor = DocumentPreprocessor()
+    classifier = DocumentClassifier()
+    info_extractor = InfoExtractor()
+
+    # File upload with progress
+    uploaded_file = st.file_uploader(
+        "Drag and drop your document here",
+        type=['pdf'],
+        help="Supported format: PDF"
+    )
+
+    if uploaded_file:
+        temp_path = save_uploaded_file(uploaded_file)
+        if not temp_path:
+            return
+
         try:
-            inputs = self.prepare_input(image, text, layout)
-            outputs = self.model(**inputs)
+            with st.spinner('Processing your document...'):
+                # Progress bar for processing steps
+                progress_bar = st.progress(0)
 
-            probs = torch.softmax(outputs.logits, dim=1)
-            pred_label = torch.argmax(probs, dim=1).item()
-            confidence = probs[0][pred_label].item()
+                # Step 1: Convert to image
+                image = processor.pdf_to_image(temp_path)
+                progress_bar.progress(25)
 
-            return {
-                "document_type": self.label_map.get(pred_label, "Unknown"),
-                "confidence": confidence
-            }
+                # Step 2: Extract text and layout
+                text, layout = processor.extract_text(image)
+                progress_bar.progress(50)
+
+                # Step 3: Classify document
+                classification = classifier.predict(image, text, layout)
+                progress_bar.progress(75)
+
+                # Step 4: Extract information
+                extracted_info = info_extractor.extract(text)
+                progress_bar.progress(100)
+
+                # Display results in tabs
+                tab1, tab2, tab3 = st.tabs(["📑 Overview", "👤 Details", "📝 Raw Text"])
+
+                with tab1:
+                    st.subheader("Document Analysis Results")
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.markdown("#### Document Type")
+                        st.info(classification['document_type'].replace('_', ' ').title())
+
+                        st.markdown("#### Confidence Score")
+                        display_confidence_meter(classification['confidence'])
+
+                    with col2:
+                        st.markdown("#### Document Preview")
+                        st.image(image, caption='Uploaded Document', use_column_width=True)
+
+                with tab2:
+                    st.markdown("#### Extracted Information")
+                    info_col1, info_col2 = st.columns(2)
+
+                    with info_col1:
+                        st.markdown("##### Personal Details")
+                        st.write(f"**Name:** {extracted_info.get('name', 'Not Found')}")
+                        st.write(f"**Email:** {extracted_info.get('email', 'Not Found')}")
+                        st.write(f"**ID:** {extracted_info.get('id_number', 'Not Found')}")
+
+                    with info_col2:
+                        st.markdown("##### Additional Information")
+                        st.write(f"**Address:** {extracted_info.get('address', 'Not Found')}")
+                        st.write(f"**Phone:** {extracted_info.get('phone', 'Not Found')}")
+                        st.write(f"**Date:** {extracted_info.get('date', ['Not Found'])[0]}")
+
+                with tab3:
+                    st.markdown("#### Extracted Text")
+                    st.text_area("Full Document Text", text, height=300)
+
+                # Update processed documents count
+                st.session_state.processed_docs += 1
+
+                # Validation results
+                try:
+                    validate_document(classification['document_type'], extracted_info)
+                    st.success("✅ Document validation passed")
+                except ValidationError as e:
+                    st.warning(f"⚠️ Validation notice: {str(e)}")
+
         except Exception as e:
-            print(f"Error during prediction: {e}")
-            return {"document_type": "Error", "confidence": 0.0}
+            st.error(f"An error occurred during processing: {str(e)}")
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
 
-    def train(self, train_dataset, val_dataset, epochs=3, batch_size=16, learning_rate=5e-5):
-        """
-        Trains the LayoutLMv2 model on the provided datasets.
 
-        Args:
-            train_dataset (Dataset): Training dataset.
-            val_dataset (Dataset): Validation dataset.
-            epochs (int): Number of training epochs.
-            batch_size (int): Batch size for training and validation.
-            learning_rate (float): Learning rate for optimizer.
-        """
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size)
-
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
-        criterion = torch.nn.CrossEntropyLoss()
-
-        self.model.train()
-
-        for epoch in range(epochs):
-            print(f"Epoch {epoch + 1}/{epochs}")
-            total_loss = 0
-
-            for batch in tqdm(train_loader, desc="Training"):
-                images, texts, layouts, labels = batch
-
-                # Prepare inputs
-                inputs = self.processor(
-                    images, texts, boxes=[self._get_boxes(layout) for layout in layouts],
-                    padding="max_length", max_length=512, truncation=True, return_tensors="pt"
-                ).to(self.device)
-
-                labels = labels.to(self.device)
-
-                # Forward pass
-                outputs = self.model(**inputs)
-                loss = criterion(outputs.logits, labels)
-
-                # Backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                total_loss += loss.item()
-
-            avg_loss = total_loss / len(train_loader)
-            print(f"Training Loss: {avg_loss:.4f}")
-
-            # Validation step
-            self._validate(val_loader, criterion)
-
-    def _validate(self, val_loader, criterion):
-        """
-        Validates the model on the validation dataset.
-        """
-        self.model.eval()
-        total_loss = 0
-        correct = 0
-        total = 0
-
-        with torch.no_grad():
-            for batch in tqdm(val_loader, desc="Validating"):
-                images, texts, layouts, labels = batch
-
-                # Prepare inputs
-                inputs = self.processor(
-                    images, texts, boxes=[self._get_boxes(layout) for layout in layouts],
-                    padding="max_length", max_length=512, truncation=True, return_tensors="pt"
-                ).to(self.device)
-
-                labels = labels.to(self.device)
-
-                # Forward pass
-                outputs = self.model(**inputs)
-                loss = criterion(outputs.logits, labels)
-
-                total_loss += loss.item()
-
-                # Accuracy
-                preds = torch.argmax(outputs.logits, dim=1)
-                correct += (preds == labels).sum().item()
-                total += labels.size(0)
-
-        avg_loss = total_loss / len(val_loader)
-        accuracy = correct / total
-        print(f"Validation Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}"
+if __name__ == "__main__":
+    main()
